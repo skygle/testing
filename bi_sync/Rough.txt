@@ -1,0 +1,97 @@
+1. Make folders and files owned by same user
+   test the command.
+   rsync -avr -o -g /source/directory user@:destinationHost/destination/directory
+
+    -- Implemented, have to test
+
+2. exclude directory
+    rsync -arv --exclude=.ccache --exclude=build /home/ben /media/ben/thumbdrive/
+
+3. Create parent directories      -- Implemented, have to test
+
+4. Different directory structure owned by different users
+   CHanllenges: which user we should use to execute script?
+                Individual users or root user?
+
+                root   --- oracle
+                root   --- appmgr               --- No root permission is not available in production
+                root   --- appoid
+
+                       OR
+                appmgr   ---  appmgr
+                webapp   ---  webapp          -- try to copy appmgr first. check it works?
+                appoid   ---  appoid
+
+1. Samples:
+from 98 appmgr
+/tmp/sync.sh -h lxapp14095.dc.corp.telstra.com -u appmgr -g oinstall -l /app01/stage -r /tmp/check/stagep/stage
+
+
+
+feedback:
+1. Host entries should be taken from properties file1  --implemented, have to test it
+2. Reduce the checks for all directory copy            --implemented it have to test
+3. Divided files as binary, configurations and data  and write script compatible or not  --on hold
+4. Track files which are failed to copy
+5. proper erorr message or codes.
+6. Implement logging. keep logs for 7 days for nonprd. 30 days for prod.
+
+  check_ssh_connectivity
+  check_hostentry
+  check_login
+
+ let prechecks to run once in a day.
+
+ 7. Check previous job is tracked.
+ 8. check time taken, notify if it takes more than 15 mins
+
+
+
+ .
+
+ 9. Bandwidth limit is required?  --no
+
+ 10. Move sync function to functions file.    how many parameters it has ?. dont pass values as parameters. check that variable initialized
+                                              after sourcing the file works in function. implemented, have to test it
+ 11. get the current bandwidth, and transfer statistics    --check in prod and DR
+ 12. identify files being written while transferring files.    --based on the analysis, implement the functionality and test it
+                                                               --challenge is that open files should be writing in remote server, from there the list should be passed.
+                                                                --this feature is not required. Animesh asked to use inplace option. iplace option enables the resume behaviour
+
+ 13. machine identification and setup in DR.                --do it after the script working fine
+ 14. add comments at final delivery.             -- needs to improved
+ 15. Limitations of rsync. and documentation for rsync.  - get some references and templates
+ 14. Notification mechanism needs to be identified.      - waiting for control m tem reply
+
+LSOF:
+The next command lists files that are open in the directory specified,
+and also descends into sub-directories. Beware: this can take a very long time to run for large directory structures:
+
+$ lsof +D '/Users/al'
+
+files read and write modes explained in this link.
+
+https://unix.stackexchange.com/questions/101904/lsof-show-files-open-as-read-write
+
+
+Exclude multiple files from rsync.
+
+rsync -avz --exclude-from 'exclude-list.txt' source/ destination/
+
+$ vim exclude-list.txt
+file1.txt
+dir3/file4.txt
+
+
+
+New feedback:
+============
+
+If any folder fail to sync it has to through the error and Exit    -Done
+Comment push option                                                - Done
+
+
+
+
+/oracleapps/FMW12.2.1.3.0_for_BIP/Middleware/Oracle_Home/user_projects/domains/BIDomain/bidata/components/bipublisher/repository/Reports
+/oracleapps/FMW12.2.1.3.0_for_BIP/Middleware/Oracle_Home/user_projects/domains/BIDomain/bidata/components/bipublisher/repository/Users

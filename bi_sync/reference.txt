@@ -1,0 +1,32 @@
+1. BI cluster node sync scripts
+
+a. Installation:
+    Copy the scripts to the second server
+    create the File which contains list of folders which needs to be synced
+    Ex:
+
+    Schedule the script in crontab:
+    [appmgr@lxapp14014 bi_sync]$ cat input_file
+    /app01/appmgr/bip_middleware/user_projects/domains/bi_domain/bidata/components/bipublisher/repository/Reports
+    /app01/appmgr/bip_middleware/user_projects/domains/bi_domain/bidata/components/bipublisher/repository/Users
+
+
+    [appmgr@lxapp14014 bin]$ cat schedule.sh
+    cd /app01/appmgr/scripts/bi_sync/bin
+    ./wrapper.sh lxapp14013.dc.corp.telstra.com appmgr /app01/appmgr/scripts/bi_sync/input_file pull
+    ./wrapper.sh lxapp14013.dc.corp.telstra.com appmgr /app01/appmgr/scripts/bi_sync/input_file push
+
+B. How use
+
+   Setup ssh keys between two nodes
+   Call the script with below syntax
+
+   ./wrapper.sh Node1 User input_file action
+
+   Node1 : Hostname of the first nodes
+   User  : unix user of the first node(BIP installation owner)
+   input_file : file containing list of folder where needs to be synced
+   action: pull or push  (have to call both action in different
+
+c .Log and error files:
+   Logs and error will be created in $SCRIPTS_HOME/log and    $SCRIPTS_HOME/error directory

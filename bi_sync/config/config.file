@@ -1,0 +1,4 @@
+clean_log=30
+process_long=900
+ignore_process=yes
+clean_acl=1440
