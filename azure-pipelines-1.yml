@@ -46,7 +46,6 @@ jobs:
 - job: RunsOnServer
   dependsOn: [PrecheckJob]
   pool: Server
-  condition: eq(variables['someName'], 'true')
   steps:
   - task: Delay@1
     inputs:
@@ -63,4 +62,5 @@ jobs:
       targetType: 'inline'
       script: |
         set -e
+        echo $someName
         echo "hello"
