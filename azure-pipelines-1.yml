@@ -30,8 +30,11 @@ jobs:
               json.dump(data, file)
           EOF`
           python -c "$python_code"
+          cat buidjson.json
           curl -X PUT -H "Authorization: Bearer $(System.AccessToken)" -H "Content-Type: application/json" -d "@buidjson.json" "$(System.TeamFoundationCollectionUri)/$(System.TeamProject)/_apis/build/definitions/$(System.DefinitionId)?api-version=5.0"
+          echo $?
           curl -o buidjson1.json -H "Authorization:Bearer $(System.AccessToken)" "$(System.TeamFoundationCollectionUri)/$(System.TeamProject)/_apis/build/definitions/$(System.DefinitionId)?api-version=5.0"
+          echo $?
           cat buidjsonl.json
 
 - job: RunsOnServer
