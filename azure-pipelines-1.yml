@@ -20,16 +20,17 @@ jobs:
           import json
           import os
 
-          nested_dict = {'variables':{'someName': {'value' : 'true'}}}
+          nested_dict = {'variables':{'someName': {'value': 'true'}}}
           with open ("buidjson.json", "r+") as file:
-              data = json.load (file)
-              data.update (nested dict)
+              data = json.load(file)
+              data.update (nested_dict)
               file.seek(0)
               json.dump (data, file)
           EOF`
           curl -x PUT -H "Authorization :Bearer $(System.AccessToken)" -H "Content-Type:application/json" -d "@buidjson.json" $(System.TeamFoundationCollectionUri)/$(System.TeamProject)/_apis/build/definitions/$(System.DefinitionId)?api-version=5.0"
           curl -o buidjson1.json -H "Authorization:Bearer $ (System.AccessToken)" "$(System. TeamFoundationCollectionUri)/$(System.TeamProject)/_apis/build/definitions/$(System. DefinitionId)?api-version-5.0"
           cat buidjsonl.json
+
     continueOnError: false
     enabled: yes
 
