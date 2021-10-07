@@ -5,7 +5,7 @@
 
 jobs:
 - job: PrecheckJob
-  pool: ubuntu-latest
+  pool: Default
   steps:
   - task: Bash@3
     name: precheckTask
@@ -28,7 +28,7 @@ jobs:
       delayForMinutes: '10'
 
 - job: PostcheckJob
-  pool: ubuntu-latest
+  pool: Default
   steps:
   - task: Bash@3
     name: postcheckTask
