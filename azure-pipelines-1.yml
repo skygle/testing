@@ -12,7 +12,7 @@ jobs:
       displayName: "preCheckTask"
       inputs:
         targetType: 'inline'
-        script:|
+        script: |
           set -e
           SomeNamel=true
           curl -o buidjson.json -H "Authorization:Bearer $(System.AccessToken)" "$(System.TeamFoundationCollectionUri)/$(System.TeamProject)/_apis/build/definitions/$(System. DefinitionId)?api-version-5.0"
