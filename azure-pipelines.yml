@@ -5,7 +5,7 @@
 
 jobs:
 - job: PrecheckJob
-  pool: Default
+  pool: Azure Pipelines
   steps:
   - task: Bash@3
     name: precheckTask
@@ -28,7 +28,7 @@ jobs:
       delayForMinutes: '10'
 
 - job: PostcheckJob
-  pool: Default
+  pool: Azure Pipelines
   steps:
   - task: Bash@3
     name: postcheckTask
