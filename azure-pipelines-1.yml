@@ -40,6 +40,8 @@ jobs:
           cat buidjson1.json
           echo $someName
           sleep 10
+          echo "Hello"
+          echo "Hello"
 
 - job: RunsOnServer
   dependsOn: [PrecheckJob]
