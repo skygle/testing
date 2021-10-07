@@ -21,7 +21,7 @@ jobs:
   variables:
     somename1: $[ dependencies.PrecheckJob.outputs['somename1'] ]
   pool: Server
-  condition: eq($[ dependencies.PrecheckJob.outputs['somename1'] ], 'true')
+  condition: eq(dependencies.PrecheckJob.outputs['somename1'], 'true')
   steps:
   - task: Delay@1
     inputs:
