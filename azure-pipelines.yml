@@ -21,13 +21,14 @@ jobs:
   variables:
     somename1: $[ dependencies.PrecheckJob.outputs['somename1'] ]
   pool: Server
-  condition: eq(variables['somename1'], 'true')
+  condition: eq($[ dependencies.PrecheckJob.outputs['somename1'] ], 'true')
   steps:
   - task: Delay@1
     inputs:
       delayForMinutes: '10'
 
 - job: PostcheckJob
+  dependsOn: [PrecheckJob,RunsOnServer]
   pool: Azure Pipelines
   steps:
   - task: Bash@3
