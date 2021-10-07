@@ -14,7 +14,7 @@ jobs:
       targetType: 'inline'
       script: |
         set -e
-        echo "##vso[task.setvariable variable=somename1;isOutput=true']true"
+        echo "##vso[task.setvariable variable=somename1;isOutput=true;]true"
 
 - job: RunsOnServer
   dependsOn: [PrecheckJob]
