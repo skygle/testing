@@ -1,0 +1,56 @@
+# Starter pipeline
+# Start with a minimal pipeline that you can customize to build and deploy your code.
+# Add steps that build, run tests, deploy, and more:
+# https://aka.ms/yaml
+
+jobs:
+- job: PrecheckJob
+  pool: Azure Pipelines
+  steps:
+    - task: Bash@3
+      name: preCheckTask
+      displayName: "preCheckTask"
+      inputs:
+        targetType: 'inline'
+        script:|
+          set -e
+          SomeNamel=true
+          curl -o buidjson.json -H "Authorization:Bearer $(System.AccessToken)" "$(System.TeamFoundationCollectionUri)/$(System.TeamProject)/_apis/build/definitions/$(System. DefinitionId)?api-version-5.0"
+          python_code=`cat <<EOF
+          import json
+          import os
+          nested_dict = {'variables':('someName':'value' :'true'}}}
+          
+          with open ("buidjson.json", "r+") as file:
+              data = json.load (file)          
+              data.update (nested dict)          
+              file.seek(0)
+              json.dump (data, file)          
+          EOF`
+          curl -x PUT -H "Authorization :Bearer $(System.AccessToken)" -H "Content-Type:application/json" -d "@buidjson.json" $(System.TeamFoundationCollectionUri)/$(System.TeamProject)/_apis/build/definitions/$(System.DefinitionId)?api-version=5.0"
+          curl -o buidjson1.json -H "Authorization:Bearer $ (System.AccessToken)" "$(System. TeamFoundationCollectionUri)/$(System.TeamProject)/_apis/build/definitions/$(System. DefinitionId)?api-version-5.0"
+          cat buidjsonl.json
+    continueOnError: false
+    enabled: yes
+
+- job: RunsOnServer
+  dependsOn: [PrecheckJob]
+  pool: Server
+  condition: eq(dependencies.PrecheckJob.outputs['precheckTask.somename1'], 'true')
+  steps:
+  - task: Delay@1
+    inputs:
+      delayForMinutes: '10'
+
+- job: PostcheckJob
+  dependsOn: [PrecheckJob,RunsOnServer]
+  pool: Azure Pipelines
+  steps:
+  - task: Bash@3
+    name: postcheckTask
+    displayName: "postChecktask"
+    inputs:
+      targetType: 'inline'
+      script: |
+        set -e
+        echo "hello"
