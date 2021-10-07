@@ -37,7 +37,7 @@ jobs:
           echo "Getting the variables"
           curl -o buidjson1.json -H "Authorization:Bearer $(System.AccessToken)" "$(System.TeamFoundationCollectionUri)/$(System.TeamProject)/_apis/build/definitions/$(System.DefinitionId)?api-version=5.0"
           echo $?
-          cat buidjsonl.json
+          cat buidjson1.json
 
 - job: RunsOnServer
   dependsOn: [PrecheckJob]
