@@ -2,6 +2,8 @@
 # Start with a minimal pipeline that you can customize to build and deploy your code.
 # Add steps that build, run tests, deploy, and more:
 # https://aka.ms/yaml
+variables:
+  someName: 'false'
 
 jobs:
 - job: PrecheckJob
@@ -27,6 +29,7 @@ jobs:
               file.seek(0)
               json.dump(data, file)
           EOF`
+          python -c "$python_code"
           curl -X PUT -H "Authorization: Bearer $(System.AccessToken)" -H "Content-Type: application/json" -d "@buidjson.json" "$(System.TeamFoundationCollectionUri)/$(System.TeamProject)/_apis/build/definitions/$(System.DefinitionId)?api-version=5.0"
           curl -o buidjson1.json -H "Authorization:Bearer $(System.AccessToken)" "$(System.TeamFoundationCollectionUri)/$(System.TeamProject)/_apis/build/definitions/$(System.DefinitionId)?api-version=5.0"
           cat buidjsonl.json
@@ -34,7 +37,7 @@ jobs:
 - job: RunsOnServer
   dependsOn: [PrecheckJob]
   pool: Server
-  condition: eq(dependencies.PrecheckJob.outputs['precheckTask.somename1'], 'true')
+  condition: eq(variables['someName'], 'true')
   steps:
   - task: Delay@1
     inputs:
