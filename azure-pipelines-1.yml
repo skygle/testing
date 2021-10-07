@@ -14,8 +14,8 @@ jobs:
         targetType: 'inline'
         script: |
           set -e
-          SomeNamel=true
-          curl -o buidjson.json -H "Authorization:Bearer $(System.AccessToken)" "$(System.TeamFoundationCollectionUri)/$(System.TeamProject)/_apis/build/definitions/$(System. DefinitionId)?api-version-5.0"
+          someNamel=true
+          curl -o buidjson.json -H "Authorization:Bearer $(System.AccessToken)" "$(System.TeamFoundationCollectionUri)/$(System.TeamProject)/_apis/build/definitions/$(System.DefinitionId)?api-version-5.0"
           python_code=`cat <<EOF
           import json
           import os
@@ -28,7 +28,7 @@ jobs:
               json.dump (data, file)
           EOF`
           curl -x PUT -H "Authorization :Bearer $(System.AccessToken)" -H "Content-Type:application/json" -d "@buidjson.json" $(System.TeamFoundationCollectionUri)/$(System.TeamProject)/_apis/build/definitions/$(System.DefinitionId)?api-version=5.0"
-          curl -o buidjson1.json -H "Authorization:Bearer $ (System.AccessToken)" "$(System. TeamFoundationCollectionUri)/$(System.TeamProject)/_apis/build/definitions/$(System. DefinitionId)?api-version-5.0"
+          curl -o buidjson1.json -H "Authorization:Bearer $ (System.AccessToken)" "$(System.TeamFoundationCollectionUri)/$(System.TeamProject)/_apis/build/definitions/$(System.DefinitionId)?api-version-5.0"
           cat buidjsonl.json
 
 - job: RunsOnServer
