@@ -1,0 +1,217 @@
+mydb=> SELECT MIN(date_of_purchase) FROM car_data;
+    min
+------------
+ 2025-03-28
+(1 row)
+
+mydb=> SELECT MAX(date_of_purchase) FROM car_data;
+    max
+------------
+ 2025-06-26
+(1 row)
+
+mydb=> ALTER TABLE car_data ADD CONSTRAINT car_data_check_constraint CHECK (date_of_purchase >= DATE '2025-03-28' AND date_of_purchase <= DATE '2025-06-26') NOT VALID;
+ALTER TABLE
+mydb=> ALTER TABLE car_data VALIDATE CONSTRAINT car_data_check_constraint;
+ALTER TABLE
+mydb=> BEGIN TRANSACTION;
+
+ALTER TABLE car_data RENAME TO car_data_old;
+
+ALTER TABLE ix_email RENAME TO ix_email_old;
+
+ALTER TABLE ix_city_of_purchase RENAME TO ix_city_of_purchase_old;
+
+CREATE TABLE car_data (email VARCHAR(100),
+name VARCHAR(60),
+car_make VARCHAR(40),
+car_model VARCHAR(40),
+date_of_purchase DATE,
+car_model_year INT,
+car_price DECIMAL(11,2),
+city_of_purchase VARCHAR(30),
+country_of_purchase VARCHAR(40),
+car_color VARCHAR(20),
+car_vin VARCHAR(40))
+PARTITION BY RANGE (date_of_purchase);
+
+CREATE INDEX ix_email ON car_data(email);
+
+CREATE INDEX ix_city_of_purchase ON car_data(city_of_purchase);
+
+CREATE INDEX ix_date_of_purchase ON car_data(date_of_purchase);
+
+CREATE TABLE car_data_p202207 PARTITION OF car_data FOR VALUES FROM ('2025-07-01') TO ('2025-08-01');
+
+COMMIT;
+
+BEGIN
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+CREATE TABLE
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE TABLE
+COMMIT
+
+
+mydb=> ALTER TABLE car_data ATTACH PARTITION car_data_old FOR VALUES FROM ('2025-03-27') TO ('2025-06-27');
+ALTER TABLE
+mydb=> ALTER TABLE car_data_old DROP CONSTRAINT car_data_check_constraint;
+ALTER TABLE
+mydb=> select count(*) from car_data;
+ count
+-------
+  1000
+(1 row)
+
+
+
+mydb=> BEGIN TRANSACTION;
+ALTER TABLE car_data DETACH PARTITION car_data_old;
+CREATE TABLE car_data_p202503 PARTITION OF car_data FOR VALUES FROM ('2025-03-01') TO ('2025-04-01');
+INSERT INTO car_data_p202503 SELECT * FROM car_data_old WHERE date_of_purchase >= '2025-03-01' AND date_of_purchase <= '2025-03-31';
+DELETE FROM car_data_old WHERE date_of_purchase >= '2025-03-01' AND date_of_purchase <= '2025-03-31';
+ALTER TABLE car_data_old ADD CONSTRAINT car_data_check_constraint CHECK (date_of_purchase >= DATE '2025-04-01' AND date_of_purchase < DATE '2025-06-27') NOT VALID;
+ALTER TABLE car_data_old VALIDATE CONSTRAINT car_data_check_constraint;
+ALTER TABLE car_data ATTACH PARTITION car_data_old FOR VALUES FROM ('2025-04-01') TO ('2025-06-27');
+ALTER TABLE car_data_old DROP CONSTRAINT car_data_check_constraint;
+COMMIT;
+
+BEGIN
+ALTER TABLE
+CREATE TABLE
+INSERT 0 36
+DELETE 36
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+COMMIT
+
+mydb=> select count(*) from car_data;
+ count
+-------
+  1000
+(1 row)
+
+mydb=> SELECT inhrelid::regclass AS partition_name FROM  pg_inherits WHERE  inhparent = 'car_data'::regclass;
+  partition_name
+------------------
+ car_data_p202207
+ car_data_p202503
+ car_data_old
+(3 rows)
+
+mydb=> select count(*) from car_data_p202207;
+ count
+-------
+     0
+(1 row)
+
+mydb=> select count(*) from car_data_p202503;
+ count
+-------
+    36
+(1 row)
+
+mydb=> select count(*) from car_data_old;
+ count
+-------
+   964
+(1 row)
+
+mydb=> BEGIN TRANSACTION;
+ALTER TABLE car_data DETACH PARTITION car_data_old;
+CREATE TABLE car_data_p202504 PARTITION OF car_data FOR VALUES FROM ('2025-04-01') TO ('2025-05-01');
+INSERT INTO car_data_p202504 SELECT * FROM car_data_old WHERE date_of_purchase >= '2025-04-01' AND date_of_purchase <= '2025-04-30';
+DELETE FROM car_data_old WHERE date_of_purchase >= '2025-04-01' AND date_of_purchase <= '2025-04-30';
+ALTER TABLE car_data_old ADD CONSTRAINT car_data_check_constraint CHECK (date_of_purchase >= DATE '2025-05-01' AND date_of_purchase < DATE '2025-06-27') NOT VALID;
+ALTER TABLE car_data_old VALIDATE CONSTRAINT car_data_check_constraint;
+ALTER TABLE car_data ATTACH PARTITION car_data_old FOR VALUES FROM ('2025-05-01') TO ('2025-06-27');
+ALTER TABLE car_data_old DROP CONSTRAINT car_data_check_constraint;
+COMMIT;
+BEGIN
+ALTER TABLE
+CREATE TABLE
+INSERT 0 336
+DELETE 336
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+COMMIT
+mydb=> SELECT  inhrelid::regclass AS partition_name FROM  pg_inherits WHERE  inhparent = 'car_data'::regclass;
+  partition_name
+------------------
+ car_data_p202207
+ car_data_p202503
+ car_data_p202504
+ car_data_old
+(4 rows)
+
+mydb=> select count(*) from car_data_p202504;
+ count
+-------
+   336
+(1 row)
+
+mydb=> select count(*) from car_data_old;
+ count
+-------
+   628
+(1 row)
+
+mydb=> BEGIN TRANSACTION;
+ALTER TABLE car_data DETACH PARTITION car_data_old;
+CREATE TABLE car_data_p202505 PARTITION OF car_data FOR VALUES FROM ('2025-05-01') TO ('2025-06-01');
+INSERT INTO car_data_p202505 SELECT * FROM car_data_old WHERE date_of_purchase >= '2025-05-01' AND date_of_purchase <= '2025-05-31';
+DELETE FROM car_data_old WHERE date_of_purchase >= '2025-05-01' AND date_of_purchase <= '2025-05-31';
+ALTER TABLE car_data_old ADD CONSTRAINT car_data_check_constraint CHECK (date_of_purchase >= DATE '2025-06-01' AND date_of_purchase < DATE '2025-06-27') NOT VALID;
+ALTER TABLE car_data_old VALIDATE CONSTRAINT car_data_check_constraint;
+ALTER TABLE car_data ATTACH PARTITION car_data_old FOR VALUES FROM ('2025-06-01') TO ('2025-06-27');
+ALTER TABLE car_data_old DROP CONSTRAINT car_data_check_constraint;
+COMMIT;
+BEGIN
+ALTER TABLE
+CREATE TABLE
+INSERT 0 327
+DELETE 327
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+COMMIT
+mydb=> select count(*) from car_data_old;
+ count
+-------
+   301
+(1 row)
+
+mydb=> BEGIN TRANSACTION;
+ALTER TABLE car_data DETACH PARTITION car_data_old;
+CREATE TABLE car_data_p202506 PARTITION OF car_data FOR VALUES FROM ('2025-06-01') TO ('2025-07-01');
+INSERT INTO car_data_p202506 SELECT * FROM car_data_old WHERE date_of_purchase >= '2025-06-01' AND date_of_purchase <= '2025-06-30';
+DELETE FROM car_data_old WHERE date_of_purchase >= '2025-06-01' AND date_of_purchase <= '2025-06-30';
+COMMIT;
+BEGIN
+ALTER TABLE
+CREATE TABLE
+INSERT 0 301
+DELETE 301
+COMMIT
+mydb=> select count(*) from car_data_old;
+ count
+-------
+     0
+(1 row)
+
+mydb=> select count(*) from car_data;
+ count
+-------
+  1000
+(1 row)
+
+mydb=>
