@@ -4,20 +4,31 @@ CURRENT_USER=$(id -un)
 
 MYSQL_OS_USER=$(ps -ef | awk '/[m]ysqld/ { print $1; exit }')
 
-if [ -z "$MYSQL_OS_USER" ]; then
-    MYSQL_OS_USER=mysql
-fi
-
 if [ "$CURRENT_USER" != "$MYSQL_OS_USER" ]; then
     case "$0" in
         /*) SCRIPT_PATH=$0 ;;
         *) SCRIPT_PATH=$(pwd)/$0 ;;
     esac
 
-    if command -v sudo >/dev/null 2>&1; then
+    # 1. Test sudo capability
+    if command -v sudo >/dev/null 2>&1 && sudo -n -u "$MYSQL_OS_USER" true >/dev/null 2>&1; then
+        echo "--> sudo test passed. Executing with sudo..."
         exec sudo -u "$MYSQL_OS_USER" /bin/bash "$SCRIPT_PATH" "$@"
-    else
+
+    # 2. Test runuser capability (Preferred for root user)
+    elif command -v runuser >/dev/null 2>&1 && [ "$(id -u)" -eq 0 ] && runuser -u "$MYSQL_OS_USER" -- true >/dev/null 2>&1; then
+        echo "--> runuser test passed. Executing with runuser..."
+        exec runuser -u "$MYSQL_OS_USER" -- /bin/bash "$SCRIPT_PATH" "$@"
+
+    # 3. Test su capability
+    elif command -v su >/dev/null 2>&1 && su -s /bin/bash "$MYSQL_OS_USER" -c "true" >/dev/null 2>&1; then
+        echo "--> su test passed. Executing with su..."
+        # Safely preserve arguments when using su -c
         exec su -s /bin/bash "$MYSQL_OS_USER" -c "$SCRIPT_PATH"
+
+    # 4. Fallback failure if none pass verification
+    else
+        echo "Error: None of the user-switching tools (sudo, runuser, su) passed validation to switch to '$MYSQL_OS_USER'." >&2
     fi
 fi
 
