@@ -215,3 +215,8 @@ mydb=> select count(*) from car_data;
 (1 row)
 
 mydb=>
+
+
+
+
+systemctl list-units --type=service --full --no-legend 'postgresql*' | awk '{print $1}' | head -n 1
