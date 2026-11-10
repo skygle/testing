@@ -1,0 +1,345 @@
+<#
+.SYNOPSIS
+    Collects MongoDB inventory details from the local server and writes them
+    to a comma-separated .csv file in C:\temp (header first, then one
+    line per MongoDB instance/service).
+
+.NOTES
+    Run this on each database server.
+    Role (PRIMARY/STANDBY) and data size are collected through mongosh.
+    If the instance has authorization enabled, define these environment variables
+    for the Windows account that runs this script (no password is stored in the script):
+        MONGO_USER      a monitoring user (for example one with the built-in clusterMonitor role)
+        MONGO_PASSWORD  its password
+    If authorization is not enabled, nothing needs to be configured.
+#>
+
+# ---------------- Configuration ----------------
+$MONGO_HOST      = ""           # blank = taken from the service's net.bindIp (127.0.0.1 when not set)
+$LOG_SIZE_SOURCE = "JOURNAL"    # "JOURNAL" = WiredTiger journal (transaction log) | "SERVERLOG" = mongod log files
+$DELIMITER       = ","          # comma-separated; every field is quoted, so commas inside values are safe
+
+# ---------------- Static values ----------------
+$RDBMS          = "Mongodb"
+$HOSTNAME_FQDN  = $env:COMPUTERNAME
+$SERVERNAME     = $HOSTNAME_FQDN
+$INSTANCENAME   = "Mongodb"
+$COLLECTED_DATE = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+$OUT_DIR        = "C:\temp"
+$OUT_FILE       = Join-Path $OUT_DIR ("MongoDB_Inventory_{0}_{1}.csv" -f $HOSTNAME_FQDN, (Get-Date -Format "yyyyMMdd_HHmmss"))
+
+# Create the output directory if it does not exist
+if (-not (Test-Path -Path $OUT_DIR)) {
+    try {
+        New-Item -ItemType Directory -Path $OUT_DIR -Force -ErrorAction Stop | Out-Null
+    }
+    catch {
+        Write-Host "Cannot create output directory $OUT_DIR : $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
+}
+
+$columns = @(
+    "rdbms", "hostname", "servername", "instancename", "dbversion", "edition",
+    "srvcollation", "datekey", "dbname", "state_desc", "dbrmode",
+    "totalsizemb", "datasizemb", "logsizemb",
+    "fullbkstart", "fullbkfinish", "fullbksizemb", "fullbkcompMB", "fullbkdevice", "toolused",
+    "incbkstart", "incbkfinish", "incbksizemb", "incbkcompmb", "incbkdevice",
+    "nologbkps", "totlgbkpsizemb", "logbkstart", "logbkfinish", "logbksizemb", "logbkcompmb", "logbkdevice",
+    "collectedDate", "remarks"
+)
+
+# JavaScript run by the shell. Every metric is wrapped in its own try/catch, so one failing
+# command (for example a missing privilege) does not lose the others. It prints one JSON line.
+$MONGO_JS = @'
+var out = {};
+function envVar(n) {
+  try { return (typeof process !== "undefined") ? process.env[n] : _getEnv(n); } catch (e) { return null; }
+}
+function isAuthError(e) {
+  var m = String((e && e.message) || e);
+  return !!((e && (e.code === 13 || e.code === 18)) || /requires authentication|not authorized|unauthorized|authentication failed/i.test(m));
+}
+try {
+  var u = envVar("MONGO_USER"), p = envVar("MONGO_PASSWORD");
+  if (u && p) {
+    var r = db.getSiblingDB("admin").auth(u, p);
+    if (r === 0 || r === false) { out.authError = true; }
+  }
+} catch (e) { out.authError = true; }
+try {
+  var h;
+  try { h = db.adminCommand({ hello: 1 }); } catch (e1) { h = db.adminCommand({ isMaster: 1 }); }
+  if (h.arbiterOnly) { out.role = "ARBITER"; }
+  else if (h.secondary) { out.role = "STANDBY"; }
+  else if (h.isWritablePrimary || h.ismaster) { out.role = "PRIMARY"; }
+} catch (e) {}
+try {
+  var bi = db.adminCommand({ buildInfo: 1 });
+  out.version = bi.version;
+  out.modules = bi.modules || [];
+} catch (e) {}
+try {
+  var ld = db.adminCommand({ listDatabases: 1 });
+  var ts = ld.totalSize;
+  out.totalSize = (ts && typeof ts.toNumber === "function") ? ts.toNumber() : Number(ts);
+} catch (e) { if (isAuthError(e)) { out.authError = true; } }
+print(JSON.stringify(out));
+'@
+
+# ---------------- Helper functions ----------------
+function New-Row {
+    $r = [ordered]@{}
+    foreach ($c in $columns) { $r[$c] = "" }
+    $r['rdbms']         = $RDBMS
+    $r['hostname']      = $HOSTNAME_FQDN
+    $r['servername']    = $SERVERNAME
+    $r['instancename']  = $INSTANCENAME
+    $r['collectedDate'] = $COLLECTED_DATE
+    return $r
+}
+
+function ConvertTo-DelimitedLine {
+    param($Values)
+    ($Values | ForEach-Object { '"' + ([string]$_).Replace('"', '""') + '"' }) -join $DELIMITER
+}
+
+function Add-RowToOutput {
+    param($Row)
+    $lines.Add((ConvertTo-DelimitedLine -Values ($columns | ForEach-Object { $Row[$_] })))
+}
+
+# Runs the inventory script through mongosh (or the legacy mongo shell).
+# Returns the parsed JSON object, or $null if the shell could not connect or run.
+function Invoke-MongoScript {
+    param([string]$ClientPath, [string]$HostName, [int]$Port, [string]$ScriptPath)
+    try {
+        $clientArgs = @("--quiet", "--norc", "--host", $HostName, "--port", [string]$Port, $ScriptPath)
+
+        # stderr is discarded so shell warnings never end up in the collected values
+        $out = & $ClientPath @clientArgs 2>$null
+        if ($LASTEXITCODE -ne 0) { return $null }
+
+        # Take the last line that looks like the JSON object (ignores any other output)
+        $jsonLine = @($out) | Where-Object { $_ -match '^\s*\{.*\}\s*$' } | Select-Object -Last 1
+        if (-not $jsonLine) { return $null }
+        return ($jsonLine | ConvertFrom-Json)
+    }
+    catch {
+        return $null
+    }
+}
+
+# Community vs Enterprise: Enterprise builds list "enterprise" in the build modules
+function Get-MongoEdition {
+    param([string]$VersionText, [string]$ModulesText)
+
+    if ([string]::IsNullOrWhiteSpace($VersionText)) { return "" }
+    if ($ModulesText -match 'enterprise') { return "Enterprise" }
+    return "Community"
+}
+
+# Reads a value from the YAML config file (two levels: section -> key)
+function Get-MongoConfigValue {
+    param([string]$ConfigFile, [string]$Section, [string]$Key)
+
+    if (-not $ConfigFile -or -not (Test-Path $ConfigFile)) { return $null }
+
+    $current = ""
+    foreach ($line in @(Get-Content $ConfigFile -ErrorAction SilentlyContinue)) {
+        if ($line -match '^\s*#' -or $line -match '^\s*$') { continue }
+        if ($line -match '^([A-Za-z_]\w*)\s*:') { $current = $Matches[1]; continue }   # top-level key
+        if ($current -eq $Section -and $line -match ('^\s+' + [regex]::Escape($Key) + '\s*:\s*(.*)$')) {
+            $v = $Matches[1] -replace '\s+#.*$', ''
+            return $v.Trim().Trim('"').Trim("'")
+        }
+    }
+    return $null
+}
+
+# Host to connect to: localhost when it is among the bind addresses, otherwise the first bind address
+function Get-MongoHost {
+    param([string]$BindIp)
+
+    if ([string]::IsNullOrWhiteSpace($BindIp)) { return "127.0.0.1" }
+    $ips = @($BindIp -split '[,\s]+' | Where-Object { $_ })
+    if (@($ips | Where-Object { $_ -match '^(127\.0\.0\.1|localhost|0\.0\.0\.0|::|::1)$' }).Count -gt 0) { return "127.0.0.1" }
+    return $ips[0]
+}
+
+function Format-Mb {
+    param([double]$Bytes)
+    ([math]::Round($Bytes / 1MB, 2)).ToString("0.00", [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
+# Total size of all files under a directory, in MB ($null if it cannot be read)
+function Get-DirSizeMb {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path $Path)) { return $null }
+    $items = @(Get-ChildItem -Path $Path -Recurse -File -ErrorAction SilentlyContinue -ErrorVariable gciErr)
+    if ($items.Count -eq 0 -and $gciErr.Count -gt 0) { return $null }
+    $sum = ($items | Measure-Object -Property Length -Sum).Sum
+    if ($null -eq $sum) { $sum = 0 }
+    return (Format-Mb -Bytes $sum)
+}
+
+# Total size of the mongod log file and its rotated copies (mongod.log, mongod.log.2024-...), in MB
+function Get-LogFilesSizeMb {
+    param([string]$LogPath)
+    if (-not $LogPath) { return $null }
+    $dir  = Split-Path $LogPath -Parent
+    $leaf = Split-Path $LogPath -Leaf
+    if (-not $dir -or -not (Test-Path $dir)) { return $null }
+    $items = @(Get-ChildItem -Path $dir -File -Filter "$leaf*" -ErrorAction SilentlyContinue -ErrorVariable gciErr)
+    if ($items.Count -eq 0 -and $gciErr.Count -gt 0) { return $null }
+    $sum = ($items | Measure-Object -Property Length -Sum).Sum
+    if ($null -eq $sum) { $sum = 0 }
+    return (Format-Mb -Bytes $sum)
+}
+
+# ---------------- Main ----------------
+$lines = New-Object System.Collections.Generic.List[string]
+$lines.Add((ConvertTo-DelimitedLine -Values $columns))   # header first
+
+# Find MongoDB services by what they run (mongod.exe), so custom service names are found too
+$mongoServices = @(Get-CimInstance -ClassName Win32_Service -ErrorAction SilentlyContinue |
+    Where-Object { $_.PathName -match '[\\/]mongod\.exe' } |
+    Sort-Object Name)
+
+$JS_FILE = $null
+
+if ($mongoServices.Count -eq 0) {
+    $row = New-Row
+    $row['remarks'] = "mongodb_not_installed"
+    Add-RowToOutput -Row $row
+    Write-Host "[-] No MongoDB service found. Recorded as not installed." -ForegroundColor Yellow
+}
+else {
+    # The shell runs the script from a temporary file (avoids quoting problems on the command line)
+    $JS_FILE = Join-Path ([System.IO.Path]::GetTempPath()) ("mongo_inventory_{0}.js" -f [guid]::NewGuid().ToString("N"))
+    [System.IO.File]::WriteAllText($JS_FILE, $MONGO_JS, (New-Object System.Text.UTF8Encoding($false)))
+
+    foreach ($svc in $mongoServices) {
+        $row     = New-Row
+        $remarks = New-Object System.Collections.Generic.List[string]
+
+        # Stopped instance: state only, nothing else is gathered
+        if ($svc.State -ne 'Running') {
+            $row['state_desc'] = "OFFLINE"
+            Add-RowToOutput -Row $row
+            Write-Host "[-] $($svc.Name) is STOPPED (OFFLINE)." -ForegroundColor Red
+            continue
+        }
+
+        $row['state_desc'] = "ONLINE"
+        Write-Host "[+] $($svc.Name) is RUNNING (ONLINE)." -ForegroundColor Green
+
+        # Server binary and config file from the service definition
+        $pathName = if ($svc.PathName) { $svc.PathName } else { "" }
+
+        $exePath = $null
+        if     ($pathName -match '^\s*"([^"]+)"')   { $exePath = $Matches[1] }
+        elseif ($pathName -match '^\s*(.+?\.exe)')  { $exePath = $Matches[1] }
+
+        $cfgFile = $null
+        if     ($pathName -match '(?:--config|-f)[ =]\s*"([^"]+)"') { $cfgFile = $Matches[1] }
+        elseif ($pathName -match '(?:--config|-f)[ =]\s*(\S+)')     { $cfgFile = $Matches[1] }
+
+        $binDir = $null
+        if ($exePath -and (Test-Path $exePath)) { $binDir = Split-Path $exePath -Parent }
+
+        # Port and bind address: command line first, then the config file
+        $port = $null
+        if ($pathName -match '--port[ =]\s*(\d+)') { $port = [int]$Matches[1] }
+        if (-not $port) {
+            $portText = Get-MongoConfigValue -ConfigFile $cfgFile -Section "net" -Key "port"
+            if ($portText -match '^\d+$') { $port = [int]$portText }
+        }
+        if (-not $port) { $port = 27017 }
+
+        $mongoHost = $MONGO_HOST
+        if (-not $mongoHost) {
+            $bindIp = $null
+            if ($pathName -match '--bind_ip[ =]\s*"?([^"\s]+)') { $bindIp = $Matches[1] }
+            if (-not $bindIp) { $bindIp = Get-MongoConfigValue -ConfigFile $cfgFile -Section "net" -Key "bindIp" }
+            $bindAll = Get-MongoConfigValue -ConfigFile $cfgFile -Section "net" -Key "bindIpAll"
+            if ($bindAll -eq 'true') { $mongoHost = "127.0.0.1" } else { $mongoHost = Get-MongoHost -BindIp $bindIp }
+        }
+
+        # Shell: mongosh next to the server, on PATH, or in its usual install folders; legacy mongo.exe as last resort
+        $candidates = @()
+        if ($binDir) { $candidates += (Join-Path $binDir "mongosh.exe") }
+        $cmd = Get-Command mongosh.exe -ErrorAction SilentlyContinue
+        if ($cmd) { $candidates += $cmd.Source }
+        $candidates += "C:\Program Files\mongosh\mongosh.exe"
+        if ($env:LOCALAPPDATA) { $candidates += (Join-Path $env:LOCALAPPDATA "Programs\mongosh\mongosh.exe") }
+        if ($binDir) { $candidates += (Join-Path $binDir "mongo.exe") }
+        $client = $candidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+
+        # Version and edition from the server binary (needs no login)
+        # e.g. "db version v7.0.5 ... "modules": [ "enterprise" ]" (empty list for Community)
+        $binaryVersionText = $null
+        $modulesText       = ""
+        if ($exePath -and (Test-Path $exePath)) {
+            $binaryVersionText = (& $exePath --version 2>$null) -join " "
+            if ($binaryVersionText -match 'db version v?(\d\S*)')             { $row['dbversion'] = $Matches[1] }
+            if ($binaryVersionText -match '"modules"\s*:\s*\[([^\]]*)\]')     { $modulesText = $Matches[1] }
+        }
+
+        # Role, version and data size from the running instance
+        $info = $null
+        if ($client) {
+            $info = Invoke-MongoScript -ClientPath $client -HostName $mongoHost -Port $port -ScriptPath $JS_FILE
+        }
+
+        $dataMb = $null
+        if ($info) {
+            if ($info.version) { $row['dbversion'] = [string]$info.version }
+            if ($info.PSObject.Properties['modules']) { $modulesText = (@($info.modules) -join ",") }
+            if ($info.role) { $row['dbrmode'] = [string]$info.role }
+            if ($null -ne $info.totalSize) { $dataMb = Format-Mb -Bytes ([double]$info.totalSize) }
+        }
+
+        # Log size from disk (needs no login): journal folder or mongod log files
+        $logMb = $null
+        if ($LOG_SIZE_SOURCE -eq "SERVERLOG") {
+            $logPath = Get-MongoConfigValue -ConfigFile $cfgFile -Section "systemLog" -Key "path"
+            $logMb   = Get-LogFilesSizeMb -LogPath $logPath
+        }
+        else {
+            $dbPath = Get-MongoConfigValue -ConfigFile $cfgFile -Section "storage" -Key "dbPath"
+            if ($dbPath) { $logMb = Get-DirSizeMb -Path (Join-Path $dbPath "journal") }
+        }
+
+        if ($dataMb) { $row['datasizemb'] = $dataMb }
+        if ($logMb)  { $row['logsizemb']  = $logMb }
+        if ($dataMb -and $logMb) {
+            $total = [math]::Round(([double]$dataMb + [double]$logMb), 2)
+            $row['totalsizemb'] = $total.ToString("0.00", [System.Globalization.CultureInfo]::InvariantCulture)
+        }
+
+        # Remarks
+        $loginFailed = $false
+        if (-not $client) {
+            $remarks.Add("mongo_shell_not_found")
+        }
+        elseif ($null -eq $info -or $info.authError) {
+            $remarks.Add("db_login_not_working")
+            $loginFailed = $true
+        }
+        if ($info -and -not $info.role) { $remarks.Add("dbrmode_unknown") }
+        if ($client -and -not $loginFailed -and -not ($dataMb -and $logMb)) { $remarks.Add("size_info_incomplete") }
+
+        # Edition (uses the build modules from the running instance when available)
+        $row['edition'] = Get-MongoEdition -VersionText "$binaryVersionText $($info.version)" -ModulesText $modulesText
+
+        $row['remarks'] = ($remarks -join "|")
+        Add-RowToOutput -Row $row
+    }
+}
+
+if ($JS_FILE) { Remove-Item -Path $JS_FILE -Force -ErrorAction SilentlyContinue }
+
+# Write header + rows as UTF-8 without BOM
+[System.IO.File]::WriteAllLines($OUT_FILE, $lines, (New-Object System.Text.UTF8Encoding($false)))
+Write-Host "Output file: $OUT_FILE" -ForegroundColor Cyan
