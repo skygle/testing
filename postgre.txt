@@ -1,0 +1,270 @@
+<#
+.SYNOPSIS
+    Collects PostgreSQL inventory details from the local server and writes them
+    to a comma-separated .csv file in C:\temp (header first, then one
+    line per PostgreSQL instance/service).
+
+.NOTES
+    Run this on each database server.
+    SQL-based values (dbrmode, srvcollation, sizes) are collected only when psql
+    can log in WITHOUT a password prompt, i.e. through
+    %APPDATA%\postgresql\pgpass.conf or the PGPASSWORD environment variable.
+#>
+
+# ---------------- Configuration ----------------
+$PG_HOST         = "localhost"
+$PG_USER         = "postgres"   # Prefer a dedicated role: CREATE ROLE monitor LOGIN PASSWORD '...' IN ROLE pg_monitor;
+$PG_DATABASE     = "postgres"
+$LOG_SIZE_SOURCE = "WAL"        # "WAL" = pg_wal (transaction log) | "SERVERLOG" = server log files in log_directory
+$DELIMITER       = ","          # comma-separated; every field is quoted, so commas inside values are safe
+$servicePatterns = @("postgresql*", "edb-as*", "edb-pge*", "postgrespro*")
+
+# ---------------- Static values ----------------
+$RDBMS          = "Postgresql"
+$HOSTNAME_FQDN  = $env:COMPUTERNAME
+$SERVERNAME     = $HOSTNAME_FQDN
+$INSTANCENAME   = "Postgresql"
+$COLLECTED_DATE = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+$OUT_DIR        = "C:\temp"
+$OUT_FILE       = Join-Path $OUT_DIR ("PostgreSQL_Inventory_{0}_{1}.csv" -f $HOSTNAME_FQDN, (Get-Date -Format "yyyyMMdd_HHmmss"))
+
+# Create the output directory if it does not exist
+if (-not (Test-Path -Path $OUT_DIR)) {
+    try {
+        New-Item -ItemType Directory -Path $OUT_DIR -Force -ErrorAction Stop | Out-Null
+    }
+    catch {
+        Write-Host "Cannot create output directory $OUT_DIR : $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
+}
+
+# Never hang on an unreachable instance
+$env:PGCONNECT_TIMEOUT = "10"
+
+$columns = @(
+    "rdbms", "hostname", "servername", "instancename", "dbversion", "edition",
+    "srvcollation", "datekey", "dbname", "state_desc", "dbrmode",
+    "totalsizemb", "datasizemb", "logsizemb",
+    "fullbkstart", "fullbkfinish", "fullbksizemb", "fullbkcompMB", "fullbkdevice", "toolused",
+    "incbkstart", "incbkfinish", "incbksizemb", "incbkcompmb", "incbkdevice",
+    "nologbkps", "totlgbkpsizemb", "logbkstart", "logbkfinish", "logbksizemb", "logbkcompmb", "logbkdevice",
+    "collectedDate", "remarks"
+)
+
+# ---------------- Helper functions ----------------
+function New-Row {
+    $r = [ordered]@{}
+    foreach ($c in $columns) { $r[$c] = "" }
+    $r['rdbms']         = $RDBMS
+    $r['hostname']      = $HOSTNAME_FQDN
+    $r['servername']    = $SERVERNAME
+    $r['instancename']  = $INSTANCENAME
+    $r['collectedDate'] = $COLLECTED_DATE
+    return $r
+}
+
+function ConvertTo-DelimitedLine {
+    param($Values)
+    ($Values | ForEach-Object { '"' + ([string]$_).Replace('"', '""') + '"' }) -join $DELIMITER
+}
+
+function Add-RowToOutput {
+    param($Row)
+    $lines.Add((ConvertTo-DelimitedLine -Values ($columns | ForEach-Object { $Row[$_] })))
+}
+
+# Runs one SQL statement through psql. Returns $null if the connection or query fails.
+# -w means "never prompt for a password", so it only works when auto login is configured.
+function Invoke-PgQuery {
+    param([string]$PsqlPath, [int]$Port, [string]$Sql)
+    try {
+        $psqlArgs = @('-w', '-X', '-q', '-t', '-A', '-h', $PG_HOST, '-p', [string]$Port, '-U', $PG_USER, '-d', $PG_DATABASE)
+        $out = $Sql | & $PsqlPath @psqlArgs 2>&1
+        if ($LASTEXITCODE -ne 0) { return $null }
+        return (($out | Out-String).Trim())
+    }
+    catch {
+        return $null
+    }
+}
+
+# Community vs Enterprise (commercial distribution), inferred from service name, path and version text
+function Get-PgEdition {
+    param([string]$ServiceName, [string]$ExePath, [string]$VersionOutput)
+
+    $fingerprint = "$ServiceName | $ExePath | $VersionOutput"
+
+    switch -Regex ($fingerprint) {
+        'EnterpriseDB Advanced Server|edb-as|\\edb\\as\d+' { return "Enterprise (EDB Postgres Advanced Server)" }
+        'EDB Postgres Extended|edb-pge'                    { return "Enterprise (EDB Postgres Extended Server)" }
+        'Postgres Pro|postgrespro'                         { return "Enterprise (Postgres Pro)" }
+        'Fujitsu'                                          { return "Enterprise (Fujitsu Enterprise Postgres)" }
+        default                                            { return "Community" }
+    }
+}
+
+# Port from postmaster.pid (line 4), then postgresql.conf, then 5432
+function Get-PgPort {
+    param([string]$DataDir)
+    $port = $null
+
+    if ($DataDir) {
+        $pidFile = Join-Path $DataDir "postmaster.pid"
+        if (Test-Path $pidFile) {
+            $pidLines = @(Get-Content $pidFile -ErrorAction SilentlyContinue)
+            if ($pidLines.Count -ge 4 -and $pidLines[3] -match '^\d+$') { $port = [int]$pidLines[3] }
+        }
+        if (-not $port) {
+            $conf = Join-Path $DataDir "postgresql.conf"
+            if (Test-Path $conf) {
+                $m = Select-String -Path $conf -Pattern '^\s*port\s*=\s*(\d+)' -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($m) { $port = [int]$m.Matches[0].Groups[1].Value }
+            }
+        }
+    }
+
+    if (-not $port) { $port = 5432 }
+    return $port
+}
+
+# "postgres (PostgreSQL) 16.2"  ->  "16.2"
+function Get-VersionFromBinaryOutput {
+    param([string]$Text)
+    if ($Text -match '\)\s*(\S+)\s*$') { return $Matches[1] }
+    return $Text
+}
+
+# ---------------- Main ----------------
+$lines = New-Object System.Collections.Generic.List[string]
+$lines.Add((ConvertTo-DelimitedLine -Values $columns))   # header first
+
+# Find all PostgreSQL-family services (e.g. postgresql-x64-16, edb-as-15)
+$pgServices = @(foreach ($pattern in $servicePatterns) {
+    Get-Service -Name $pattern -ErrorAction SilentlyContinue
+})
+$pgServices = @($pgServices | Sort-Object Name -Unique)
+
+if ($pgServices.Count -eq 0) {
+    $row = New-Row
+    $row['remarks'] = "postgres_not_installed"
+    Add-RowToOutput -Row $row
+    Write-Host "[-] No PostgreSQL service found. Recorded as not installed." -ForegroundColor Yellow
+}
+else {
+    foreach ($svc in $pgServices) {
+        $row     = New-Row
+        $remarks = New-Object System.Collections.Generic.List[string]
+
+        # Stopped instance: state only, nothing else is gathered
+        if ($svc.Status -ne 'Running') {
+            $row['state_desc'] = "OFFLINE"
+            Add-RowToOutput -Row $row
+            Write-Host "[-] $($svc.Name) is STOPPED (OFFLINE)." -ForegroundColor Red
+            continue
+        }
+
+        $row['state_desc'] = "ONLINE"
+        Write-Host "[+] $($svc.Name) is RUNNING (ONLINE)." -ForegroundColor Green
+
+        # Service binary path and data directory from the service definition
+        $wmi      = Get-CimInstance -ClassName Win32_Service -Filter "Name = '$($svc.Name)'" -ErrorAction SilentlyContinue
+        $pathName = if ($wmi -and $wmi.PathName) { $wmi.PathName } else { "" }
+
+        $exePath = $null
+        if ($pathName -match '"([^"]+)"') { $exePath = $Matches[1] }
+        elseif ($pathName)                { $exePath = $pathName.Split(' ')[0] }
+
+        $dataDir = $null
+        if ($pathName -match '-D\s+"([^"]+)"')  { $dataDir = $Matches[1] }
+        elseif ($pathName -match '-D\s+(\S+)')  { $dataDir = $Matches[1] }
+
+        $binDir = $null
+        if ($exePath -and (Test-Path $exePath)) { $binDir = Split-Path $exePath -Parent }
+
+        # psql from the same installation as the service (handles several versions side by side)
+        $psql = $null
+        if ($binDir -and (Test-Path (Join-Path $binDir "psql.exe"))) {
+            $psql = Join-Path $binDir "psql.exe"
+        }
+        else {
+            $cmd = Get-Command psql.exe -ErrorAction SilentlyContinue
+            if ($cmd) { $psql = $cmd.Source }
+        }
+
+        # Version from the server binary (needs no login)
+        $binaryVersionText = $null
+        if ($binDir) {
+            $serverExe = @("postgres.exe", "edb-postgres.exe") |
+                ForEach-Object { Join-Path $binDir $_ } |
+                Where-Object { Test-Path $_ } |
+                Select-Object -First 1
+            if ($serverExe) {
+                $binaryVersionText = (& $serverExe --version 2>$null) -join " "
+                $row['dbversion']  = Get-VersionFromBinaryOutput -Text $binaryVersionText
+            }
+        }
+
+        $port = Get-PgPort -DataDir $dataDir
+
+        # SQL-based values, only when automatic login works
+        $sqlVersionText = $null
+        if ($psql) {
+            $sqlVersionText = Invoke-PgQuery -PsqlPath $psql -Port $port -Sql "SELECT version();"
+        }
+
+        if (-not [string]::IsNullOrEmpty($sqlVersionText)) {
+
+            $ver = Invoke-PgQuery -PsqlPath $psql -Port $port -Sql "SHOW server_version;"
+            if ($ver) { $row['dbversion'] = $ver }
+
+            # Server encoding
+            $enc = Invoke-PgQuery -PsqlPath $psql -Port $port -Sql "SHOW server_encoding;"
+            if ($enc) { $row['srvcollation'] = $enc }
+
+            # PRIMARY or STANDBY
+            $rec = Invoke-PgQuery -PsqlPath $psql -Port $port -Sql "SELECT pg_is_in_recovery();"
+            if     ($rec -eq 't') { $row['dbrmode'] = "STANDBY" }
+            elseif ($rec -eq 'f') { $row['dbrmode'] = "PRIMARY" }
+
+            # Data size: all databases
+            $dataMb = Invoke-PgQuery -PsqlPath $psql -Port $port -Sql "SELECT ROUND(COALESCE(SUM(pg_database_size(datname)), 0) / 1048576.0, 2) FROM pg_database;"
+
+            # Log size: WAL (pg_wal) or server log files
+            if ($LOG_SIZE_SOURCE -eq "SERVERLOG") {
+                $logSql = "SELECT ROUND(COALESCE(SUM(size), 0) / 1048576.0, 2) FROM pg_ls_logdir();"
+            }
+            else {
+                $logSql = "SELECT ROUND(COALESCE(SUM(size), 0) / 1048576.0, 2) FROM pg_ls_waldir();"
+            }
+            $logMb = Invoke-PgQuery -PsqlPath $psql -Port $port -Sql $logSql
+
+            if ($dataMb) { $row['datasizemb'] = $dataMb }
+            if ($logMb)  { $row['logsizemb']  = $logMb }
+
+            if ($dataMb -and $logMb) {
+                $total = [math]::Round(([double]$dataMb + [double]$logMb), 2)
+                $row['totalsizemb'] = $total.ToString("0.00", [System.Globalization.CultureInfo]::InvariantCulture)
+            }
+            else {
+                $remarks.Add("size_info_incomplete")
+            }
+        }
+        elseif (-not $psql) {
+            $remarks.Add("psql_not_found")
+        }
+        else {
+            $remarks.Add("db_login_not_working")
+        }
+
+        # Edition (uses version() text from SQL when available)
+        $row['edition'] = Get-PgEdition -ServiceName $svc.Name -ExePath $exePath -VersionOutput "$binaryVersionText $sqlVersionText"
+
+        $row['remarks'] = ($remarks -join "|")
+        Add-RowToOutput -Row $row
+    }
+}
+
+# Write header + rows as UTF-8 without BOM
+[System.IO.File]::WriteAllLines($OUT_FILE, $lines, (New-Object System.Text.UTF8Encoding($false)))
+Write-Host "Output file: $OUT_FILE" -ForegroundColor Cyan
