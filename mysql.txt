@@ -1,0 +1,277 @@
+<#
+.SYNOPSIS
+    Collects MySQL inventory details from the local server and writes them
+    to a comma-separated .csv file in C:\temp (header first, then one
+    line per MySQL instance/service).
+
+.NOTES
+    Run this on each database server.
+    SQL-based values (dbrmode, srvcollation, sizes) are collected only when the
+    mysql client can log in WITHOUT a password prompt, i.e. through a login path
+    created with mysql_config_editor (%APPDATA%\MySQL\.mylogin.cnf) or an option
+    file containing [client] user/password entries.
+#>
+
+# ---------------- Configuration ----------------
+$MYSQL_HOST       = "127.0.0.1"
+$MYSQL_USER       = ""          # blank = use the user from the login path / option file
+$MYSQL_LOGIN_PATH = ""          # e.g. "monitor", created with: mysql_config_editor set --login-path=monitor --user=monitor --password
+$LOG_SIZE_SOURCE  = "REDO"      # "REDO" = InnoDB redo log (transaction log) | "BINLOG" = binary logs
+$DELIMITER        = ","         # comma-separated; every field is quoted, so commas inside values are safe
+
+# ---------------- Static values ----------------
+$RDBMS          = "Mysql"
+$HOSTNAME_FQDN  = $env:COMPUTERNAME
+$SERVERNAME     = $HOSTNAME_FQDN
+$INSTANCENAME   = "Mysql"
+$COLLECTED_DATE = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+$OUT_DIR        = "C:\temp"
+$OUT_FILE       = Join-Path $OUT_DIR ("MySQL_Inventory_{0}_{1}.csv" -f $HOSTNAME_FQDN, (Get-Date -Format "yyyyMMdd_HHmmss"))
+
+# Create the output directory if it does not exist
+if (-not (Test-Path -Path $OUT_DIR)) {
+    try {
+        New-Item -ItemType Directory -Path $OUT_DIR -Force -ErrorAction Stop | Out-Null
+    }
+    catch {
+        Write-Host "Cannot create output directory $OUT_DIR : $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
+}
+
+$columns = @(
+    "rdbms", "hostname", "servername", "instancename", "dbversion", "edition",
+    "srvcollation", "datekey", "dbname", "state_desc", "dbrmode",
+    "totalsizemb", "datasizemb", "logsizemb",
+    "fullbkstart", "fullbkfinish", "fullbksizemb", "fullbkcompMB", "fullbkdevice", "toolused",
+    "incbkstart", "incbkfinish", "incbksizemb", "incbkcompmb", "incbkdevice",
+    "nologbkps", "totlgbkpsizemb", "logbkstart", "logbkfinish", "logbksizemb", "logbkcompmb", "logbkdevice",
+    "collectedDate", "remarks"
+)
+
+# ---------------- Helper functions ----------------
+function New-Row {
+    $r = [ordered]@{}
+    foreach ($c in $columns) { $r[$c] = "" }
+    $r['rdbms']         = $RDBMS
+    $r['hostname']      = $HOSTNAME_FQDN
+    $r['servername']    = $SERVERNAME
+    $r['instancename']  = $INSTANCENAME
+    $r['collectedDate'] = $COLLECTED_DATE
+    return $r
+}
+
+function ConvertTo-DelimitedLine {
+    param($Values)
+    ($Values | ForEach-Object { '"' + ([string]$_).Replace('"', '""') + '"' }) -join $DELIMITER
+}
+
+function Add-RowToOutput {
+    param($Row)
+    $lines.Add((ConvertTo-DelimitedLine -Values ($columns | ForEach-Object { $Row[$_] })))
+}
+
+# Runs one SQL statement through the mysql client. Returns $null if the connection or query fails.
+# The client never prompts for a password unless -p is given, so this only works when
+# automatic login (login path / option file) is configured.
+function Invoke-MySqlQuery {
+    param([string]$ClientPath, [int]$Port, [string]$Sql)
+    try {
+        $clientArgs = @()
+        if ($MYSQL_LOGIN_PATH) { $clientArgs += "--login-path=$MYSQL_LOGIN_PATH" }   # must be the first option
+        $clientArgs += @("--protocol=TCP", "--host=$MYSQL_HOST", "--port=$Port", "--connect-timeout=10", "-N", "-B")
+        if ($MYSQL_USER) { $clientArgs += "--user=$MYSQL_USER" }
+
+        # stderr is discarded so client warnings never end up in the collected values
+        $out = $Sql | & $ClientPath @clientArgs 2>$null
+        if ($LASTEXITCODE -ne 0) { return $null }
+        return (($out | Out-String).Trim())
+    }
+    catch {
+        return $null
+    }
+}
+
+# Community vs Enterprise, inferred from the version text
+# e.g. "(MySQL Community Server - GPL)" or "(MySQL Enterprise Server - Commercial)"
+function Get-MySqlEdition {
+    param([string]$VersionText)
+
+    if ([string]::IsNullOrWhiteSpace($VersionText)) { return "" }
+
+    switch -Regex ($VersionText) {
+        'Enterprise|Commercial' { return "Enterprise" }
+        'Percona'               { return "Community (Percona Server)" }
+        default                 { return "Community" }
+    }
+}
+
+# Port from the [mysqld] section of the service's option file, then 3306
+function Get-MySqlPort {
+    param([string]$ConfigFile)
+    $port = $null
+
+    if ($ConfigFile -and (Test-Path $ConfigFile)) {
+        $section = ""
+        foreach ($line in @(Get-Content $ConfigFile -ErrorAction SilentlyContinue)) {
+            if ($line -match '^\s*\[([^\]]+)\]') { $section = $Matches[1].Trim().ToLower(); continue }
+            if ($section -eq 'mysqld' -and $line -match '^\s*port\s*=\s*(\d+)') { $port = [int]$Matches[1]; break }
+        }
+    }
+
+    if (-not $port) { $port = 3306 }
+    return $port
+}
+
+# ---------------- Main ----------------
+$lines = New-Object System.Collections.Generic.List[string]
+$lines.Add((ConvertTo-DelimitedLine -Values $columns))   # header first
+
+# Find MySQL services by what they run (mysqld.exe), so custom service names are found too.
+# MariaDB services are excluded.
+$mysqlServices = @(Get-CimInstance -ClassName Win32_Service -ErrorAction SilentlyContinue |
+    Where-Object { $_.PathName -match 'mysqld' -and $_.PathName -notmatch 'mariadb' } |
+    Sort-Object Name)
+
+if ($mysqlServices.Count -eq 0) {
+    $row = New-Row
+    $row['remarks'] = "mysql_not_installed"
+    Add-RowToOutput -Row $row
+    Write-Host "[-] No MySQL service found. Recorded as not installed." -ForegroundColor Yellow
+}
+else {
+    foreach ($svc in $mysqlServices) {
+        $row     = New-Row
+        $remarks = New-Object System.Collections.Generic.List[string]
+
+        # Stopped instance: state only, nothing else is gathered
+        if ($svc.State -ne 'Running') {
+            $row['state_desc'] = "OFFLINE"
+            Add-RowToOutput -Row $row
+            Write-Host "[-] $($svc.Name) is STOPPED (OFFLINE)." -ForegroundColor Red
+            continue
+        }
+
+        $row['state_desc'] = "ONLINE"
+        Write-Host "[+] $($svc.Name) is RUNNING (ONLINE)." -ForegroundColor Green
+
+        # Server binary and option file from the service definition
+        $pathName = if ($svc.PathName) { $svc.PathName } else { "" }
+
+        $exePath = $null
+        if     ($pathName -match '^\s*"([^"]+)"')   { $exePath = $Matches[1] }
+        elseif ($pathName -match '^\s*(.+?\.exe)')  { $exePath = $Matches[1] }
+
+        $cfgFile = $null
+        if     ($pathName -match '--defaults-file="([^"]+)"')  { $cfgFile = $Matches[1] }
+        elseif ($pathName -match '"--defaults-file=([^"]+)"')  { $cfgFile = $Matches[1] }
+        elseif ($pathName -match '--defaults-file=(\S+)')      { $cfgFile = $Matches[1] }
+
+        $binDir = $null
+        if ($exePath -and (Test-Path $exePath)) { $binDir = Split-Path $exePath -Parent }
+
+        # mysql client from the same installation as the service (handles several versions side by side)
+        $client = $null
+        if ($binDir -and (Test-Path (Join-Path $binDir "mysql.exe"))) {
+            $client = Join-Path $binDir "mysql.exe"
+        }
+        else {
+            $cmd = Get-Command mysql.exe -ErrorAction SilentlyContinue
+            if ($cmd) { $client = $cmd.Source }
+        }
+
+        # Version and edition text from the server binary (needs no login)
+        # e.g. "mysqld.exe  Ver 8.0.36 for Win64 on x86_64 (MySQL Community Server - GPL)"
+        $binaryVersionText = $null
+        if ($exePath -and (Test-Path $exePath)) {
+            $binaryVersionText = (& $exePath --version 2>$null) -join " "
+            # Case-sensitive and word-bounded so "Server 8.0" in the install path is not matched
+            if ($binaryVersionText -cmatch '\bVer\s+(\d\S*)') { $row['dbversion'] = $Matches[1] }
+        }
+
+        $port = Get-MySqlPort -ConfigFile $cfgFile
+
+        # SQL-based values, only when automatic login works
+        $sqlVersion = $null
+        if ($client) {
+            $sqlVersion = Invoke-MySqlQuery -ClientPath $client -Port $port -Sql "SELECT VERSION();"
+        }
+
+        $sqlComment = $null
+
+        if (-not [string]::IsNullOrEmpty($sqlVersion)) {
+
+            $row['dbversion'] = $sqlVersion
+
+            $sqlComment = Invoke-MySqlQuery -ClientPath $client -Port $port -Sql "SELECT @@version_comment;"
+
+            # Server collation
+            $coll = Invoke-MySqlQuery -ClientPath $client -Port $port -Sql "SELECT @@collation_server;"
+            if ($coll) { $row['srvcollation'] = $coll }
+
+            # PRIMARY or STANDBY: a replica returns a row from SHOW REPLICA STATUS (SHOW SLAVE STATUS on older versions)
+            $rep = Invoke-MySqlQuery -ClientPath $client -Port $port -Sql "SHOW REPLICA STATUS;"
+            if ($null -eq $rep) { $rep = Invoke-MySqlQuery -ClientPath $client -Port $port -Sql "SHOW SLAVE STATUS;" }
+            if     ($null -eq $rep) { $remarks.Add("dbrmode_unknown") }
+            elseif ($rep -ne "")    { $row['dbrmode'] = "STANDBY" }
+            else                    { $row['dbrmode'] = "PRIMARY" }
+
+            # Data size: data + indexes of all schemas visible to the login
+            $dataMb = Invoke-MySqlQuery -ClientPath $client -Port $port -Sql "SELECT ROUND(COALESCE(SUM(data_length + index_length), 0) / 1048576, 2) FROM information_schema.tables;"
+
+            # Log size: InnoDB redo log or binary logs
+            $logMb = $null
+            if ($LOG_SIZE_SOURCE -eq "BINLOG") {
+                $binlogOn = Invoke-MySqlQuery -ClientPath $client -Port $port -Sql "SELECT @@log_bin;"
+                if ($binlogOn -eq "0") {
+                    $logMb = "0.00"
+                }
+                elseif ($binlogOn -eq "1") {
+                    $bl = Invoke-MySqlQuery -ClientPath $client -Port $port -Sql "SHOW BINARY LOGS;"
+                    if ($null -ne $bl) {
+                        $sumBytes = 0.0
+                        foreach ($l in ($bl -split "\r?\n")) {
+                            $f = $l -split "`t"
+                            if ($f.Count -ge 2 -and $f[1] -match '^\d+$') { $sumBytes += [double]$f[1] }
+                        }
+                        $logMb = ([math]::Round($sumBytes / 1MB, 2)).ToString("0.00", [System.Globalization.CultureInfo]::InvariantCulture)
+                    }
+                }
+            }
+            else {
+                # MySQL 8.0.30+ uses innodb_redo_log_capacity; older versions use file size x number of files
+                $logMb = Invoke-MySqlQuery -ClientPath $client -Port $port -Sql "SELECT ROUND(@@innodb_redo_log_capacity / 1048576, 2);"
+                if ([string]::IsNullOrEmpty($logMb)) {
+                    $logMb = Invoke-MySqlQuery -ClientPath $client -Port $port -Sql "SELECT ROUND(@@innodb_log_file_size * @@innodb_log_files_in_group / 1048576, 2);"
+                }
+            }
+
+            if ($dataMb) { $row['datasizemb'] = $dataMb }
+            if ($logMb)  { $row['logsizemb']  = $logMb }
+
+            if ($dataMb -and $logMb) {
+                $total = [math]::Round(([double]$dataMb + [double]$logMb), 2)
+                $row['totalsizemb'] = $total.ToString("0.00", [System.Globalization.CultureInfo]::InvariantCulture)
+            }
+            else {
+                $remarks.Add("size_info_incomplete")
+            }
+        }
+        elseif (-not $client) {
+            $remarks.Add("mysql_client_not_found")
+        }
+        else {
+            $remarks.Add("db_login_not_working")
+        }
+
+        # Edition (uses version_comment from SQL when available)
+        $row['edition'] = Get-MySqlEdition -VersionText "$binaryVersionText $sqlComment $sqlVersion"
+
+        $row['remarks'] = ($remarks -join "|")
+        Add-RowToOutput -Row $row
+    }
+}
+
+# Write header + rows as UTF-8 without BOM
+[System.IO.File]::WriteAllLines($OUT_FILE, $lines, (New-Object System.Text.UTF8Encoding($false)))
+Write-Host "Output file: $OUT_FILE" -ForegroundColor Cyan
