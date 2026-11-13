@@ -1,0 +1,2 @@
+export EDB_SUBSCRIPTION_TOKEN="TsBNfsRnyV5wUsh933Ud1HELnqG3okBA"
+curl -1sSLf "https://downloads.enterprisedb.com/$EDB_SUBSCRIPTION_TOKEN/enterprise/setup.deb.sh" | sudo -E bash
